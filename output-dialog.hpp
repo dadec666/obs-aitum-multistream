@@ -26,6 +26,7 @@ private:
 	QWidget *WizardInfoTrovo(bool edit = false);
 	QWidget *WizardInfoTikTok(bool edit = false);
 	QWidget *WizardInfoFacebook(bool edit = false);
+	QWidget *WizardInfoVkPlay(bool edit = false);
 
 	// Platform icons
 	QIcon platformIconTwitch = QIcon(":/aitum/media/twitch.png");
@@ -36,6 +37,7 @@ private:
 	QIcon platformIconTrovo = QIcon(":/aitum/media/trovo.png");
 	QIcon platformIconFacebook = QIcon(":/aitum/media/facebook.png");
 	QIcon platformIconUnknown = QIcon(":/aitum/media/unknown.png");
+	QIcon platformIconVkPlay = QIcon(":/aitum/media/vkplay.png")
 
 	obs_data_array_t *servicesData;
 
