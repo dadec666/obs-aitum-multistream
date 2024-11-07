@@ -146,6 +146,33 @@ void showVerticalWarning(QVBoxLayout *verticalLayout)
 	verticalLayout->addWidget(verticalWarning);
 }
 
+static config_t *(*get_user_config_func)(void) = nullptr;
+
+config_t *get_user_config(void)
+{
+#if LIBOBS_API_VER < MAKE_SEMANTIC_VERSION(31, 0, 0)
+	if (!get_user_config_func) {
+		if (obs_get_version() < MAKE_SEMANTIC_VERSION(31, 0, 0)) {
+			get_user_config_func = obs_frontend_get_global_config;
+			blog(LOG_INFO, "[Aitum Multistream] use global config");
+		} else {
+			auto handle = os_dlopen("obs-frontend-api");
+			if (handle) {
+				get_user_config_func = (config_t * (*)(void)) os_dlsym(handle, "obs_frontend_get_user_config");
+				os_dlclose(handle);
+				if (get_user_config_func)
+					blog(LOG_INFO, "[Aitum Multistream] use user config");
+			}
+		}
+	}
+	if (get_user_config_func)
+		return get_user_config_func();
+	return obs_frontend_get_global_config();
+#else
+	return obs_frontend_get_user_config();
+#endif
+}
+
 MultistreamDock::MultistreamDock(QWidget *parent) : QFrame(parent)
 {
 	// Main layout
@@ -210,10 +237,10 @@ MultistreamDock::MultistreamDock(QWidget *parent) : QFrame(parent)
 	outputButtonStyle(mainStreamButton);
 
 	connect(mainStreamButton, &QPushButton::clicked, [this] {
+		const auto config = get_user_config();
 		if (obs_frontend_streaming_active()) {
 			bool stop = true;
-			bool warnBeforeStreamStop =
-				config_get_bool(obs_frontend_get_global_config(), "BasicWindow", "WarnBeforeStoppingStream");
+			bool warnBeforeStreamStop = config_get_bool(config, "BasicWindow", "WarnBeforeStoppingStream");
 			if (warnBeforeStreamStop && isVisible()) {
 				auto button = QMessageBox::question(
 					this, QString::fromUtf8(obs_frontend_get_locale_string("ConfirmStop.Title")),
@@ -229,8 +256,7 @@ MultistreamDock::MultistreamDock(QWidget *parent) : QFrame(parent)
 				mainStreamButton->setChecked(true);
 			}
 		} else {
-			bool warnBeforeStreamStart =
-				config_get_bool(obs_frontend_get_global_config(), "BasicWindow", "WarnBeforeStartingStream");
+			bool warnBeforeStreamStart = config_get_bool(config, "BasicWindow", "WarnBeforeStartingStream");
 			if (warnBeforeStreamStart && isVisible()) {
 				auto button = QMessageBox::question(
 					this, QString::fromUtf8(obs_frontend_get_locale_string("ConfirmStart.Title")),
@@ -305,6 +331,7 @@ MultistreamDock::MultistreamDock(QWidget *parent) : QFrame(parent)
 	configButton = new QPushButton;
 	configButton->setMinimumHeight(30);
 	configButton->setProperty("themeID", "configIconSmall");
+	configButton->setProperty("class", "icon-gear");
 	configButton->setFlat(true);
 	configButton->setAutoDefault(false);
 	//configButton->setSizePolicy(sp2);
@@ -373,7 +400,8 @@ MultistreamDock::MultistreamDock(QWidget *parent) : QFrame(parent)
 		}
 
 		auto service = obs_frontend_get_streaming_service();
-		auto url = QString::fromUtf8(obs_service_get_connect_info(service, OBS_SERVICE_CONNECT_INFO_SERVER_URL));
+		auto url = QString::fromUtf8(service ? obs_service_get_connect_info(service, OBS_SERVICE_CONNECT_INFO_SERVER_URL)
+						     : "");
 		if (url != mainPlatformUrl) {
 			mainPlatformUrl = url;
 			mainPlatformIconLabel->setPixmap(ConfigUtils::getPlatformIconFromEndpoint(url).pixmap(30, 30));
@@ -630,10 +658,10 @@ void MultistreamDock::LoadOutput(obs_data_t *output_data, bool vertical)
 			struct calldata cd;
 			calldata_init(&cd);
 			calldata_set_string(&cd, "name", output_name.c_str());
+			auto config = get_user_config();
 			if (streamButton->isChecked()) {
 				bool start = true;
-				bool warnBeforeStreamStart = config_get_bool(obs_frontend_get_global_config(), "BasicWindow",
-									     "WarnBeforeStartingStream");
+				bool warnBeforeStreamStart = config_get_bool(config, "BasicWindow", "WarnBeforeStartingStream");
 				if (warnBeforeStreamStart && isVisible()) {
 					auto button = QMessageBox::question(
 						this, QString::fromUtf8(obs_frontend_get_locale_string("ConfirmStart.Title")),
@@ -646,8 +674,7 @@ void MultistreamDock::LoadOutput(obs_data_t *output_data, bool vertical)
 					streamButton->setChecked(false);
 			} else {
 				bool stop = true;
-				bool warnBeforeStreamStop = config_get_bool(obs_frontend_get_global_config(), "BasicWindow",
-									    "WarnBeforeStoppingStream");
+				bool warnBeforeStreamStop = config_get_bool(config, "BasicWindow", "WarnBeforeStoppingStream");
 				if (warnBeforeStreamStop && isVisible()) {
 					auto button = QMessageBox::question(
 						this, QString::fromUtf8(obs_frontend_get_locale_string("ConfirmStop.Title")),
@@ -675,8 +702,8 @@ void MultistreamDock::LoadOutput(obs_data_t *output_data, bool vertical)
 					streamButton->setChecked(false);
 			} else {
 				bool stop = true;
-				bool warnBeforeStreamStop = config_get_bool(obs_frontend_get_global_config(), "BasicWindow",
-									    "WarnBeforeStoppingStream");
+				bool warnBeforeStreamStop =
+					config_get_bool(get_user_config(), "BasicWindow", "WarnBeforeStoppingStream");
 				if (warnBeforeStreamStop && isVisible()) {
 					auto button = QMessageBox::question(
 						this, QString::fromUtf8(obs_frontend_get_locale_string("ConfirmStop.Title")),
@@ -797,7 +824,7 @@ bool MultistreamDock::StartOutput(obs_data_t *settings, QPushButton *streamButto
 	if (!settings)
 		return false;
 
-	bool warnBeforeStreamStart = config_get_bool(obs_frontend_get_global_config(), "BasicWindow", "WarnBeforeStartingStream");
+	bool warnBeforeStreamStart = config_get_bool(get_user_config(), "BasicWindow", "WarnBeforeStartingStream");
 	if (warnBeforeStreamStart && isVisible()) {
 		auto button = QMessageBox::question(this, QString::fromUtf8(obs_frontend_get_locale_string("ConfirmStart.Title")),
 						    QString::fromUtf8(obs_frontend_get_locale_string("ConfirmStart.Text")),
