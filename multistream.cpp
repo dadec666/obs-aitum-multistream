@@ -1,3 +1,4 @@
+#include "config-utils.hpp"
 #include "multistream.hpp"
 #include "obs-module.h"
 #include "version.h"
@@ -12,7 +13,6 @@
 #include <QVBoxLayout>
 #include <util/config-file.h>
 #include <util/platform.h>
-#include "config-utils.hpp"
 
 extern "C" {
 #include "file-updater.h"
@@ -31,25 +31,13 @@ bool version_info_downloaded(void *param, struct file_download_data *file)
 	UNUSED_PARAMETER(param);
 	if (!file || !file->buffer.num)
 		return true;
-	auto d = obs_data_create_from_json((const char *)file->buffer.array);
-	if (!d)
-		return true;
-	auto data = obs_data_get_obj(d, "data");
-	obs_data_release(d);
-	if (!data)
-		return true;
-	auto version = QString::fromUtf8(obs_data_get_string(data, "version"));
-	QStringList pieces = version.split(".");
-	if (pieces.count() > 2) {
-		auto major = pieces[0].toInt();
-		auto minor = pieces[1].toInt();
-		auto patch = pieces[2].toInt();
-		auto sv = MAKE_SEMANTIC_VERSION(major, minor, patch);
-		if (sv > MAKE_SEMANTIC_VERSION(PROJECT_VERSION_MAJOR, PROJECT_VERSION_MINOR, PROJECT_VERSION_PATCH)) {
-			QMetaObject::invokeMethod(multistream_dock, "NewerVersionAvailable", Q_ARG(QString, version));
-		}
+
+	QMetaObject::invokeMethod(multistream_dock, "ApiInfo", Q_ARG(QString, QString::fromUtf8((const char *)file->buffer.array)));
+
+	if (version_update_info) {
+		update_info_destroy(version_update_info);
+		version_update_info = nullptr;
 	}
-	obs_data_release(data);
 	return true;
 }
 
@@ -61,7 +49,7 @@ bool obs_module_load(void)
 	multistream_dock = new MultistreamDock(main_window);
 	obs_frontend_add_dock_by_id("AitumMultistreamDock", obs_module_text("AitumMultistream"), multistream_dock);
 
-	version_update_info = update_info_create_single("[Aitum Multistream]", "OBS", "https://api.aitum.tv/multi",
+	version_update_info = update_info_create_single("[Aitum Multistream]", "OBS", "https://api.aitum.tv/plugin/multi",
 							version_info_downloaded, nullptr);
 	return true;
 }
@@ -74,7 +62,10 @@ void obs_module_post_load()
 
 void obs_module_unload()
 {
-	update_info_destroy(version_update_info);
+	if (version_update_info) {
+		update_info_destroy(version_update_info);
+		version_update_info = nullptr;
+	}
 	if (multistream_dock) {
 		delete multistream_dock;
 	}
@@ -99,10 +90,12 @@ void RemoveWidget(QWidget *widget)
 	if (!widget)
 		return;
 	if (widget->layout()) {
-		while (QLayoutItem *item = widget->layout()->takeAt(0)) {
+		auto l = widget->layout();
+		QLayoutItem *item;
+		while (l->count() > 0 && (item = l->takeAt(0))) {
 			RemoveLayoutItem(item);
 		}
-		delete widget->layout();
+		delete l;
 	}
 	delete widget;
 }
@@ -126,6 +119,8 @@ auto outputTitleStyle = QString("QLabel{}");                                    
 auto outputGroupStyle = QString("background-color: %1; padding: 0px;")
 				.arg(QPalette().color(QPalette::ColorRole::Mid).name(QColor::HexRgb)); // wrapper around above
 
+auto outputPlatformIconSize = 36;
+
 // For showing warning for no vertical integration
 void showVerticalWarning(QVBoxLayout *verticalLayout)
 {
@@ -146,17 +141,26 @@ void showVerticalWarning(QVBoxLayout *verticalLayout)
 	verticalLayout->addWidget(verticalWarning);
 }
 
+#if LIBOBS_API_VER < MAKE_SEMANTIC_VERSION(31, 0, 0)
 static config_t *(*get_user_config_func)(void) = nullptr;
+static config_t *user_config = nullptr;
+#endif
 
 config_t *get_user_config(void)
 {
 #if LIBOBS_API_VER < MAKE_SEMANTIC_VERSION(31, 0, 0)
+	if (user_config)
+		return user_config;
 	if (!get_user_config_func) {
 		if (obs_get_version() < MAKE_SEMANTIC_VERSION(31, 0, 0)) {
 			get_user_config_func = obs_frontend_get_global_config;
 			blog(LOG_INFO, "[Aitum Multistream] use global config");
 		} else {
+#ifdef __APPLE__
+			auto handle = os_dlopen("obs-frontend-api.dylib");
+#else
 			auto handle = os_dlopen("obs-frontend-api");
+#endif
 			if (handle) {
 				get_user_config_func = (config_t * (*)(void)) os_dlsym(handle, "obs_frontend_get_user_config");
 				os_dlclose(handle);
@@ -167,7 +171,8 @@ config_t *get_user_config(void)
 	}
 	if (get_user_config_func)
 		return get_user_config_func();
-	return obs_frontend_get_global_config();
+	user_config = obs_frontend_get_global_config();
+	return user_config;
 #else
 	return obs_frontend_get_user_config();
 #endif
@@ -176,9 +181,8 @@ config_t *get_user_config(void)
 MultistreamDock::MultistreamDock(QWidget *parent) : QFrame(parent)
 {
 	// Main layout
-	auto mainLayout = new QVBoxLayout;
+	mainLayout = new QVBoxLayout;
 	mainLayout->setContentsMargins(0, 0, 0, 0);
-	mainLayout->setSpacing(0);
 	setLayout(mainLayout);
 
 	auto t = new QWidget;
@@ -222,8 +226,7 @@ MultistreamDock::MultistreamDock(QWidget *parent) : QFrame(parent)
 	// blank because we're pulling settings through from bis later
 	mainPlatformIconLabel = new QLabel;
 	auto platformIcon = ConfigUtils::getPlatformIconFromEndpoint(QString::fromUtf8(""));
-
-	mainPlatformIconLabel->setPixmap(platformIcon.pixmap(30, 30));
+	mainPlatformIconLabel->setPixmap(platformIcon.pixmap(outputPlatformIconSize, outputPlatformIconSize));
 
 	l2->addWidget(mainPlatformIconLabel);
 	l2->addWidget(bisHeaderLabel, 1);
@@ -389,6 +392,8 @@ MultistreamDock::MultistreamDock(QWidget *parent) : QFrame(parent)
 
 	mainVideo = obs_get_video();
 	connect(&videoCheckTimer, &QTimer::timeout, [this] {
+		if (exiting)
+			return;
 		if (obs_get_video() != mainVideo) {
 			oldVideo.push_back(mainVideo);
 			mainVideo = obs_get_video();
@@ -404,7 +409,8 @@ MultistreamDock::MultistreamDock(QWidget *parent) : QFrame(parent)
 						     : "");
 		if (url != mainPlatformUrl) {
 			mainPlatformUrl = url;
-			mainPlatformIconLabel->setPixmap(ConfigUtils::getPlatformIconFromEndpoint(url).pixmap(30, 30));
+			mainPlatformIconLabel->setPixmap(ConfigUtils::getPlatformIconFromEndpoint(url).pixmap(
+				outputPlatformIconSize, outputPlatformIconSize));
 		}
 
 		int idx = 0;
@@ -477,10 +483,12 @@ MultistreamDock::MultistreamDock(QWidget *parent) : QFrame(parent)
 		calldata_free(&cd);
 	});
 	videoCheckTimer.start(500);
+	LoadSettingsFile();
 }
 
 MultistreamDock::~MultistreamDock()
 {
+	videoCheckTimer.stop();
 	for (auto it = outputs.begin(); it != outputs.end(); it++) {
 		auto old = std::get<obs_output_t *>(*it);
 		signal_handler_t *signal = obs_output_get_signal_handler(old);
@@ -524,12 +532,18 @@ void MultistreamDock::frontend_event(enum obs_frontend_event event, void *privat
 
 void MultistreamDock::LoadSettingsFile()
 {
-
+	char *profile = obs_frontend_get_current_profile();
+	if (current_config && strcmp(obs_data_get_string(current_config, "name"), profile) == 0) {
+		bfree(profile);
+		return;
+	}
 	obs_data_release(current_config);
 	current_config = nullptr;
 	char *path = obs_module_config_path("config.json");
-	if (!path)
+	if (!path) {
+		bfree(profile);
 		return;
+	}
 	obs_data_t *config = obs_data_create_from_json_file_safe(path, "bak");
 	bfree(path);
 	if (!config) {
@@ -538,7 +552,8 @@ void MultistreamDock::LoadSettingsFile()
 	} else {
 		blog(LOG_INFO, "[Aitum Multistream] Loaded configuration file");
 	}
-	char *profile = obs_frontend_get_current_profile();
+	partnerBlockTime = obs_data_get_int(config, "partner_block");
+
 	auto profiles = obs_data_get_array(config, "profiles");
 	auto pc = obs_data_array_count(profiles);
 	obs_data_t *pd = nullptr;
@@ -638,7 +653,7 @@ void MultistreamDock::LoadOutput(obs_data_t *output_data, bool vertical)
 	auto platformIconLabel = new QLabel;
 	auto platformIcon = ConfigUtils::getPlatformIconFromEndpoint(endpoint);
 
-	platformIconLabel->setPixmap(platformIcon.pixmap(30, 30));
+	platformIconLabel->setPixmap(platformIcon.pixmap(outputPlatformIconSize, outputPlatformIconSize));
 
 	l2->addWidget(platformIconLabel);
 
@@ -777,6 +792,7 @@ void MultistreamDock::SaveSettings()
 		config = obs_data_create();
 		blog(LOG_WARNING, "[Aitum Multistream] New configuration file");
 	}
+	obs_data_set_int(config, "partner_block", partnerBlockTime);
 	auto profiles = obs_data_get_array(config, "profiles");
 	if (!profiles) {
 		profiles = obs_data_array_create();
@@ -1069,18 +1085,91 @@ void MultistreamDock::stream_output_stop(void *data, calldata_t *calldata)
 				Qt::QueuedConnection);
 		}
 		if (!md->exiting)
-			QMetaObject::invokeMethod(
-				button, [output] { obs_output_release(output); }, Qt::QueuedConnection);
+			QMetaObject::invokeMethod(button, [output] { obs_output_release(output); }, Qt::QueuedConnection);
 		md->outputs.erase(it);
 		break;
 	}
 	//const char *last_error = (const char *)calldata_ptr(calldata, "last_error");
 }
 
-void MultistreamDock::NewerVersionAvailable(QString version)
+void MultistreamDock::ApiInfo(QString info)
 {
-	newer_version_available = version;
-	configButton->setStyleSheet(QString::fromUtf8("background: rgb(192,128,0);"));
+	auto d = obs_data_create_from_json(info.toUtf8().constData());
+	if (!d)
+		return;
+	auto data_obj = obs_data_get_obj(d, "data");
+	obs_data_release(d);
+	if (!data_obj)
+		return;
+	auto version = obs_data_get_string(data_obj, "version");
+	int major;
+	int minor;
+	int patch;
+	if (sscanf(version, "%d.%d.%d", &major, &minor, &patch) == 3) {
+		auto sv = MAKE_SEMANTIC_VERSION(major, minor, patch);
+		if (sv > MAKE_SEMANTIC_VERSION(PROJECT_VERSION_MAJOR, PROJECT_VERSION_MINOR, PROJECT_VERSION_PATCH)) {
+			newer_version_available = QString::fromUtf8(version);
+			configButton->setStyleSheet(QString::fromUtf8("background: rgb(192,128,0);"));
+		}
+	}
+	time_t current_time = time(nullptr);
+	if (current_time < partnerBlockTime || current_time - partnerBlockTime > 1209600) {
+		obs_data_array_t *blocks = obs_data_get_array(data_obj, "partnerBlocks");
+		size_t count = obs_data_array_count(blocks);
+		size_t added_count = 0;
+		for (size_t i = count; i > 0; i--) {
+			obs_data_t *block = obs_data_array_item(blocks, i - 1);
+			auto block_type = obs_data_get_string(block, "type");
+			QBoxLayout *layout = nullptr;
+			if (strcmp(block_type, "LINK") == 0) {
+				auto button = new QPushButton(QString::fromUtf8(obs_data_get_string(block, "label")));
+				button->setStyleSheet(QString::fromUtf8(obs_data_get_string(block, "qss")));
+				auto url = QString::fromUtf8(obs_data_get_string(block, "data"));
+				connect(button, &QPushButton::clicked, [url] { QDesktopServices::openUrl(QUrl(url)); });
+				auto buttonRow = new QHBoxLayout;
+				buttonRow->setContentsMargins(8, 0, 8, 0);
+				buttonRow->setSpacing(8);
+				buttonRow->addWidget(button);
+				layout = buttonRow;
+			} else if (strcmp(block_type, "IMAGE") == 0) {
+				auto image_data = QString::fromUtf8(obs_data_get_string(block, "data"));
+				if (image_data.startsWith("data:image/")) {
+					auto pos = image_data.indexOf(";");
+					auto format = image_data.mid(11, pos - 11);
+					QImage image;
+					if (image.loadFromData(QByteArray::fromBase64(image_data.mid(pos + 7).toUtf8().constData()),
+							       format.toUtf8().constData())) {
+						auto label = new AspectRatioPixmapLabel;
+						label->setPixmap(QPixmap::fromImage(image));
+						label->setAlignment(Qt::AlignCenter);
+						label->setStyleSheet(QString::fromUtf8(obs_data_get_string(block, "qss")));
+						auto labelRow = new QHBoxLayout;
+						labelRow->addWidget(label, 1, Qt::AlignCenter);
+						layout = labelRow;
+					}
+				}
+			}
+			if (layout) {
+				added_count++;
+				if (i == 1) {
+					auto closeButton = new QPushButton("🞫");
+					connect(closeButton, &QPushButton::clicked, [this, added_count] {
+						for (size_t j = 0; j < added_count; j++) {
+							auto item = mainLayout->takeAt(1);
+							RemoveLayoutItem(item);
+						}
+						partnerBlockTime = time(nullptr);
+						SaveSettings();
+					});
+					layout->addWidget(closeButton);
+				}
+				mainLayout->insertLayout(1, layout, 0);
+			}
+			obs_data_release(block);
+		}
+		obs_data_array_release(blocks);
+	}
+	obs_data_release(data_obj);
 }
 
 void MultistreamDock::LoadVerticalOutputs(bool firstLoad)
@@ -1153,4 +1242,39 @@ void MultistreamDock::storeMainStreamEncoders()
 		}
 	}
 	obs_output_release(output);
+}
+
+AspectRatioPixmapLabel::AspectRatioPixmapLabel(QWidget *parent) : QLabel(parent)
+{
+	setMinimumSize(1, 1);
+	setScaledContents(false);
+}
+
+void AspectRatioPixmapLabel::setPixmap(const QPixmap &p)
+{
+	pix = p;
+	QLabel::setPixmap(scaledPixmap());
+}
+
+int AspectRatioPixmapLabel::heightForWidth(int width) const
+{
+	return pix.isNull() ? height() : (pix.height() * width) / pix.width();
+}
+
+QSize AspectRatioPixmapLabel::sizeHint() const
+{
+	int w = width();
+	return QSize(w, heightForWidth(w));
+}
+
+QPixmap AspectRatioPixmapLabel::scaledPixmap() const
+{
+	return pix.scaled(size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
+}
+
+void AspectRatioPixmapLabel::resizeEvent(QResizeEvent *e)
+{
+	UNUSED_PARAMETER(e);
+	if (!pix.isNull())
+		QLabel::setPixmap(scaledPixmap());
 }
